@@ -86,7 +86,10 @@ conn_types_t Network::preferredConnType() {
 }
 void Network::loop() {
   // Check W5500 link status manually (polling mode)
-  this->checkW5500Link();
+  // Only check if we don't have IP yet - once we have IP, stop checking to avoid SPI errors
+  if(settings.Ethernet.isSPIController() && !this->w5500GotIP) {
+    this->checkW5500Link();
+  }
   
   // ORDER OF OPERATIONS:
   // ----------------------------------------------
@@ -499,9 +502,11 @@ bool Network::connectWired() {
         buscfg.sclk_io_num = settings.Ethernet.SCLKPin;
         buscfg.quadwp_io_num = -1;
         buscfg.quadhd_io_num = -1;
-        buscfg.max_transfer_sz = 0;
+        buscfg.max_transfer_sz = 4096;
         
-        esp_err_t ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+        // Use SPI3_HOST instead of SPI2_HOST to avoid conflicts with CC1101
+        // CC1101 typically uses SPI1/VSPI, so SPI3 should be safe
+        esp_err_t ret = spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO);
         if(ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
           Serial.printf("Failed to initialize SPI bus: %s\n", esp_err_to_name(ret));
           ethBeginSuccess = false;
@@ -516,7 +521,7 @@ bool Network::connectWired() {
           devcfg.queue_size = 20;
           
           spi_device_handle_t spi_handle = NULL;
-          ret = spi_bus_add_device(SPI2_HOST, &devcfg, &spi_handle);
+          ret = spi_bus_add_device(SPI3_HOST, &devcfg, &spi_handle);
           if(ret != ESP_OK) {
             Serial.printf("Failed to add SPI device: %s\n", esp_err_to_name(ret));
             ethBeginSuccess = false;
@@ -967,76 +972,78 @@ void Network::emitHeap(uint8_t num) {
 }
 
 // Check W5500 link status manually
+// IMPORTANT: Do NOT call esp_eth_ioctl() - it causes SPI errors and blocks the system!
 void Network::checkW5500Link() {
   if(!this->ethStarted || !settings.Ethernet.isSPIController() || this->w5500_eth_handle == nullptr) {
     return;
   }
   
-  static unsigned long lastCheck = 0;
-  static bool lastLinkState = false;
+  static unsigned long lastIPCheck = 0;
+  static bool dhcpStarted = false;
   
-  // Only check every 2 seconds to avoid spam
-  if(millis() - lastCheck < 2000) return;
-  lastCheck = millis();
-  
-  // Check link status via speed (if we can get speed, link is up)
-  esp_eth_handle_t eth_handle = (esp_eth_handle_t)this->w5500_eth_handle;
-  eth_speed_t speed;
-  esp_err_t ret = esp_eth_ioctl(eth_handle, ETH_CMD_G_SPEED, &speed);
-  
-  if(ret == ESP_OK) {
-    // If we can get speed, link is up
-    bool currentLink = true;
-    
-    if(currentLink != lastLinkState) {
-      lastLinkState = currentLink;
-      if(currentLink) {
-        Serial.println("W5500: Link UP");
-        this->w5500LinkUp = true;
-        // Start DHCP client now that link is up
-        if(this->w5500_netif) {
-          esp_netif_dhcpc_start(this->w5500_netif);
+  // Once we have IP, just verify it's still valid periodically (every 30 seconds)
+  if(this->w5500GotIP) {
+    if(millis() - lastIPCheck >= 30000) {
+      lastIPCheck = millis();
+      if(this->w5500_netif) {
+        esp_netif_ip_info_t ip_info;
+        if(esp_netif_get_ip_info(this->w5500_netif, &ip_info) == ESP_OK) {
+          if(ip_info.ip.addr == 0) {
+            // IP lost, reset state
+            Serial.println("W5500: IP lost!");
+            this->w5500GotIP = false;
+            this->w5500LinkUp = false;
+            this->connType = conn_types_t::unset;
+            dhcpStarted = false;
+          }
         }
-      } else {
-        Serial.println("W5500: Link DOWN");
-        this->w5500LinkUp = false;
-        this->w5500GotIP = false;
-        this->connType = conn_types_t::unset;
       }
     }
-    
-    // If link is up but no IP yet, check for IP
-    if(currentLink && !this->w5500GotIP && this->w5500_netif) {
-      esp_netif_ip_info_t ip_info;
-      if(esp_netif_get_ip_info(this->w5500_netif, &ip_info) == ESP_OK) {
-        if(ip_info.ip.addr != 0) {
-          this->w5500GotIP = true;
-          this->w5500IP = IPAddress(
-            esp_ip4_addr_get_byte(&ip_info.ip, 0),
-            esp_ip4_addr_get_byte(&ip_info.ip, 1),
-            esp_ip4_addr_get_byte(&ip_info.ip, 2),
-            esp_ip4_addr_get_byte(&ip_info.ip, 3)
-          );
-          Serial.print("W5500: Got IP ");
-          Serial.println(this->w5500IP);
-          
-          // Configure DNS servers from netif or use defaults
-          esp_netif_dns_info_t dns_info;
-          if(esp_netif_get_dns_info(this->w5500_netif, ESP_NETIF_DNS_MAIN, &dns_info) == ESP_OK && dns_info.ip.u_addr.ip4.addr != 0) {
-            ip_addr_t dns_addr;
-            dns_addr.type = IPADDR_TYPE_V4;
-            dns_addr.u_addr.ip4.addr = dns_info.ip.u_addr.ip4.addr;
-            dns_setserver(0, &dns_addr);
-          } else {
-            // Use Google DNS as fallback
-            ip_addr_t dns_addr;
-            IP_ADDR4(&dns_addr, 8, 8, 8, 8);
-            dns_setserver(0, &dns_addr);
-          }
-          
-          this->setConnected(conn_types_t::ethernet);
-        }
+    return; // Don't do anything else once we have IP
+  }
+  
+  // If we don't have IP yet, check for it every 2 seconds
+  if(millis() - lastIPCheck < 2000) return;
+  lastIPCheck = millis();
+  
+  // Start DHCP if not already started
+  if(!dhcpStarted && this->w5500_netif) {
+    Serial.println("W5500: Starting DHCP client...");
+    esp_netif_dhcpc_start(this->w5500_netif);
+    dhcpStarted = true;
+    this->w5500LinkUp = true; // Assume link is up if we're trying DHCP
+  }
+  
+  // Check for IP
+  if(this->w5500_netif) {
+    esp_netif_ip_info_t ip_info;
+    if(esp_netif_get_ip_info(this->w5500_netif, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {
+      this->w5500GotIP = true;
+      this->w5500LinkUp = true;
+      this->w5500IP = IPAddress(
+        esp_ip4_addr_get_byte(&ip_info.ip, 0),
+        esp_ip4_addr_get_byte(&ip_info.ip, 1),
+        esp_ip4_addr_get_byte(&ip_info.ip, 2),
+        esp_ip4_addr_get_byte(&ip_info.ip, 3)
+      );
+      Serial.print("W5500: Got IP ");
+      Serial.println(this->w5500IP);
+      
+      // Configure DNS servers from netif or use defaults
+      esp_netif_dns_info_t dns_info;
+      if(esp_netif_get_dns_info(this->w5500_netif, ESP_NETIF_DNS_MAIN, &dns_info) == ESP_OK && dns_info.ip.u_addr.ip4.addr != 0) {
+        ip_addr_t dns_addr;
+        dns_addr.type = IPADDR_TYPE_V4;
+        dns_addr.u_addr.ip4.addr = dns_info.ip.u_addr.ip4.addr;
+        dns_setserver(0, &dns_addr);
+      } else {
+        // Use Google DNS as fallback
+        ip_addr_t dns_addr;
+        IP_ADDR4(&dns_addr, 8, 8, 8, 8);
+        dns_setserver(0, &dns_addr);
       }
+      
+      this->setConnected(conn_types_t::ethernet);
     }
   }
 }
