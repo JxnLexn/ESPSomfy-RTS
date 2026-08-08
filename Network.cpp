@@ -30,6 +30,12 @@
 extern ConfigSettings settings;
 extern Web webServer;
 extern SocketEmitter sockEmit;
+
+// Network connection state can be updated by WiFi/Ethernet event tasks that
+// are not subscribed to the task watchdog. Reset it only for subscribed tasks.
+static inline void safeWatchdogReset() {
+  if(esp_task_wdt_status(nullptr) == ESP_OK) esp_task_wdt_reset();
+}
 extern MQTTClass mqtt;
 extern rebootDelay_t rebootDelay;
 extern Network net;
@@ -251,7 +257,7 @@ void Network::emitSockets(uint8_t num) {
   this->emitHeap(num);
 }
 void Network::setConnected(conn_types_t connType) {
-  esp_task_wdt_reset();
+  safeWatchdogReset();
   this->connType = connType;
   this->connectTime = millis();
   connectRetries = 0;
@@ -280,7 +286,7 @@ void Network::setConnected(conn_types_t connType) {
   }
   // NET: Begin this in the startup.
   //sockEmit.begin();
-  esp_task_wdt_reset();
+  safeWatchdogReset();
   
   if(this->connectAttempts == 1) {
     Serial.println();
@@ -336,7 +342,7 @@ void Network::setConnected(conn_types_t connType) {
           settings.IP.dns2 = ETH.dnsIP(1);
         }
       }
-      esp_task_wdt_reset();
+      safeWatchdogReset();
       JsonSockEvent *json = sockEmit.beginEmit("ethernet");
       json->beginObject();
       json->addElem("connected", this->connected());
@@ -344,7 +350,7 @@ void Network::setConnected(conn_types_t connType) {
       json->addElem("fullduplex", settings.Ethernet.isSPIController() ? true : ETH.fullDuplex());
       json->endObject();
       sockEmit.endEmit();
-      esp_task_wdt_reset();
+      safeWatchdogReset();
     }
   }
   else {
@@ -400,7 +406,7 @@ void Network::setConnected(conn_types_t connType) {
   SSDP.setManufacturerURL(0, "https://github.com/JxnLexn");
   SSDP.setURL(0, "/");
   SSDP.setActive(0, true);
-  esp_task_wdt_reset();
+  safeWatchdogReset();
   
   // Try to start mDNS, but don't spam errors if it fails
   // mDNS errors are normal and non-blocking
@@ -423,11 +429,11 @@ void Network::setConnected(conn_types_t connType) {
   // Reduce mDNS verbosity by setting log level (if supported)
   // The errors are harmless and occur when mDNS tries to register before network is ready
   if(settings.ssdpBroadcast) {
-    esp_task_wdt_reset();
+    safeWatchdogReset();
     SSDP.begin();
   }
   else if(SSDP.isStarted) SSDP.end();
-  esp_task_wdt_reset();
+  safeWatchdogReset();
   this->emitSockets();
   settings.printAvailHeap();
   this->needsBroadcast = true;

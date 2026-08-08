@@ -3,6 +3,7 @@
 #include <LittleFS.h>
 #include <Update.h>
 #include <esp_task_wdt.h>
+#include <esp_timer.h>
 #include "mbedtls/md.h"
 #include "ConfigSettings.h"
 #include "ConfigFile.h"
@@ -810,6 +811,7 @@ void Web::handleDiscovery(WebServer &server) {
     resp.addElem("free", ESP.getFreeHeap());
     resp.addElem("min", ESP.getMinFreeHeap());
     resp.addElem("total", ESP.getHeapSize());
+    resp.addElem("uptime", (uint64_t)(esp_timer_get_time() / 1000ULL));
     resp.endObject();
     resp.beginArray("rooms");
     somfy.toJSONRooms(resp);

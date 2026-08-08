@@ -36,6 +36,7 @@ class JsonFormatter {
     */
     void addElem(int32_t lval);
     void addElem(uint32_t lval);
+    void addElem(uint64_t lval);
     void addElem(bool bval);
     
     void addElem(const char* name, float fval);
@@ -49,6 +50,7 @@ class JsonFormatter {
     */
     void addElem(const char* name, int32_t lval);
     void addElem(const char* name, uint32_t lval);
+    void addElem(const char* name, uint64_t lval);
     void addElem(const char* name, bool bval);
     void addElem(const char *name, const char *val);
 };

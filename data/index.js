@@ -1270,7 +1270,7 @@ var security = new Security();
 
 class General {
     initialized = false; 
-    appVersion = 'v2.4.8';
+    appVersion = 'v2.5.0';
     reloadApp = false;
     init() {
         if (this.initialized) return;
@@ -4478,6 +4478,22 @@ class Firmware {
         if (sp) sp.innerHTML = mem.max.fmt('#,##0');
         sp = document.getElementById('spanMinMemory');
         if (sp) sp.innerHTML = mem.min.fmt('#,##0');
+        sp = document.getElementById('spanUptime');
+        if (sp) {
+            let seconds = Math.floor(mem.uptime / 1000);
+            const days = Math.floor(seconds / 86400);
+            seconds %= 86400;
+            const hours = Math.floor(seconds / 3600);
+            seconds %= 3600;
+            const minutes = Math.floor(seconds / 60);
+            seconds %= 60;
+            const parts = [];
+            if (days > 0) parts.push(`${days}d`);
+            if (hours > 0) parts.push(`${hours}h`);
+            if (minutes > 0) parts.push(`${minutes}m`);
+            if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
+            sp.innerHTML = parts.join(' ');
+        }
 
 
     }
