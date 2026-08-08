@@ -25,6 +25,11 @@ extern Network net;
 
 
 #define MAX_BUFF_SIZE 4096
+#define GITHUB_REPOSITORY "JxnLexn/ESPSomfy-RTS"
+#define GITHUB_API_RELEASES "https://api.github.com/repos/" GITHUB_REPOSITORY "/releases"
+#define GITHUB_RELEASE_DOWNLOAD "https://github.com/" GITHUB_REPOSITORY "/releases/download"
+#define GITHUB_REPOSITORY_URL "https://github.com/" GITHUB_REPOSITORY
+
 void GitRelease::setReleaseProperty(const char *key, const char *val) {
   if(strcmp(key, "id") == 0) this->id = atol(val);
   else if(strcmp(key, "draft") == 0) this->draft = toBoolean(val, false);
@@ -97,15 +102,8 @@ int16_t GitRepo::getReleases(uint8_t num) {
   uint8_t ndx = 0;
   uint8_t count = min((uint8_t)GIT_MAX_RELEASES, num);
   char url[128];
-  memset(this->releases, 0x00, sizeof(GitRelease) * GIT_MAX_RELEASES);
-  sprintf(url, "https://api.github.com/repos/rstrouse/espsomfy-rts/releases?per_page=%d&page=1", count);
-  GitRelease *main = &this->releases[GIT_MAX_RELEASES];
-  main->releaseDate = Timestamp::now();
-  main->id = 1;
-  main->main = true;
-  strcpy(main->version.name, "main");
-  strcpy(main->name, "Main");
-  strcpy(main->hwVersions, "32,s3");
+  memset(this->releases, 0x00, sizeof(this->releases));
+  snprintf(url, sizeof(url), GITHUB_API_RELEASES "?per_page=%d&page=1", count);
   HTTPClient https;
   https.setReuse(false);
   if(https.begin(sclient, url)) {
@@ -253,8 +251,6 @@ void GitRepo::toJSON(JsonResponse &json) {
 
 void GitUpdater::loop() {
   if(!net.connected()) return;
-  // Skip OTA check for W5500 - HTTPClient has issues without WiFi event groups
-  if(settings.Ethernet.isSPIController()) return;
   if(this->status == GIT_STATUS_READY) {
     if(settings.checkForUpdate && 
       (millis() > net.connectTime + 60000) && // Wait a minute before checking after connection.
@@ -359,7 +355,7 @@ int GitUpdater::checkInternet() {
   esp_task_wdt_reset();
   HTTPClient https;
   https.setReuse(false);
-  if(https.begin(sclient, "https://github.com/rstrouse/ESPSomfy-RTS")) {
+  if(https.begin(sclient, GITHUB_REPOSITORY_URL)) {
     https.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
     https.setTimeout(3000);
     esp_task_wdt_reset();
@@ -423,8 +419,7 @@ void GitUpdater::setFirmwareFile() {
 
 bool GitUpdater::beginUpdate(const char *version) {
   Serial.println("Begin update called...");
-  if(strcmp(version, "Main") == 0)  strcpy(this->baseUrl, "https://raw.githubusercontent.com/rstrouse/ESPSomfy-RTS/master/");
-  else sprintf(this->baseUrl, "https://github.com/rstrouse/ESPSomfy-RTS/releases/download/%s/", version);
+  snprintf(this->baseUrl, sizeof(this->baseUrl), GITHUB_RELEASE_DOWNLOAD "/%s/", version);
   
   strcpy(this->targetRelease, version);
   this->emitUpdateCheck();
@@ -454,7 +449,7 @@ bool GitUpdater::beginUpdate(const char *version) {
   return true;
 }
 bool GitUpdater::recoverFilesystem() {
-  sprintf(this->baseUrl, "https://github.com/rstrouse/ESPSomfy-RTS/releases/download/%s/", settings.fwVersion.name);
+  snprintf(this->baseUrl, sizeof(this->baseUrl), GITHUB_RELEASE_DOWNLOAD "/%s/", settings.fwVersion.name);
   strcpy(this->currentFile, "SomfyController.littlefs.bin");
   this->status = GIT_UPDATING;
   this->partition = U_SPIFFS;

@@ -21,6 +21,12 @@
 #include <driver/gpio.h>
 #include <lwip/dns.h>
 
+#if CONFIG_IDF_TARGET_ESP32 || CONFIG_IDF_TARGET_ESP32C3
+#define W5500_SPI_HOST SPI2_HOST
+#else
+#define W5500_SPI_HOST SPI3_HOST
+#endif
+
 extern ConfigSettings settings;
 extern Web webServer;
 extern SocketEmitter sockEmit;
@@ -72,13 +78,11 @@ conn_types_t Network::preferredConnType() {
         return settings.WIFI.ssid[0] != '\0' && (!linkUp && this->ethStarted) ? conn_types_t::wifi : conn_types_t::ethernet;
       }
     case conn_types_t::ethernet:
-      // If Ethernet failed to start or link is down, fallback to AP
       {
         bool linkUp = settings.Ethernet.isSPIController() ? this->w5500LinkUp : ETH.linkUp();
-        if(!this->ethStarted || !linkUp) {
-          return conn_types_t::ap;
-        }
-        return conn_types_t::ethernet;
+        // Always make the first initialization attempt. Only fall back to the
+        // setup access point after Ethernet has started without a valid link.
+        return linkUp || !this->ethStarted ? conn_types_t::ethernet : conn_types_t::ap;
       }
     default:
       return settings.connType; 
@@ -86,8 +90,7 @@ conn_types_t Network::preferredConnType() {
 }
 void Network::loop() {
   // Check W5500 link status manually (polling mode)
-  // Only check if we don't have IP yet - once we have IP, stop checking to avoid SPI errors
-  if(settings.Ethernet.isSPIController() && !this->w5500GotIP) {
+  if(settings.Ethernet.isSPIController()) {
     this->checkW5500Link();
   }
   
@@ -392,9 +395,9 @@ void Network::setConnected(conn_types_t connType) {
     snprintf(sModel, sizeof(sModel), "ESP32-%s", settings.chipModel);
     SSDP.setModelNumber(0, sModel);
   }
-  SSDP.setModelURL(0, "https://github.com/rstrouse/ESPSomfy-RTS");
-  SSDP.setManufacturer(0, "rstrouse");
-  SSDP.setManufacturerURL(0, "https://github.com/rstrouse");
+  SSDP.setModelURL(0, "https://github.com/JxnLexn/ESPSomfy-RTS");
+  SSDP.setManufacturer(0, "JxnLexn");
+  SSDP.setManufacturerURL(0, "https://github.com/JxnLexn");
   SSDP.setURL(0, "/");
   SSDP.setActive(0, true);
   esp_task_wdt_reset();
@@ -460,17 +463,17 @@ bool Network::connectWired() {
     this->ethStarted = true;
     // Don't disable WiFi yet - we'll do it only if Ethernet succeeds
     // WiFi.mode(WIFI_OFF);
-    if(settings.hostname[0] != '\0') 
-      ETH.setHostname(settings.hostname);
-    else
-      ETH.setHostname("ESPSomfy-RTS");
-    Serial.print("Set hostname to:");
-    Serial.println(ETH.getHostname());
-    
     bool ethBeginSuccess = false;
     
     // Check if this is a SPI-based controller (W5500)
     bool isSPI = settings.Ethernet.isSPIController();
+
+    if(!isSPI) {
+      if(settings.hostname[0] != '\0') ETH.setHostname(settings.hostname);
+      else ETH.setHostname("ESPSomfy-RTS");
+      Serial.print("Set hostname to:");
+      Serial.println(ETH.getHostname());
+    }
     
     if(isSPI) {
       // W5500 uses SPI interface - use ESP-IDF APIs
@@ -504,9 +507,10 @@ bool Network::connectWired() {
         buscfg.quadhd_io_num = -1;
         buscfg.max_transfer_sz = 4096;
         
-        // Use SPI3_HOST instead of SPI2_HOST to avoid conflicts with CC1101
-        // CC1101 typically uses SPI1/VSPI, so SPI3 should be safe
-        esp_err_t ret = spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO);
+        // The Arduino CC1101 library uses SPI3 on ESP32 and SPI2 on S2/S3.
+        // Put W5500 on the other host where the target provides one. ESP32-C3
+        // only exposes SPI2_HOST, so it cannot provide two independent buses.
+        esp_err_t ret = spi_bus_initialize(W5500_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
         if(ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
           Serial.printf("Failed to initialize SPI bus: %s\n", esp_err_to_name(ret));
           ethBeginSuccess = false;
@@ -521,7 +525,7 @@ bool Network::connectWired() {
           devcfg.queue_size = 20;
           
           spi_device_handle_t spi_handle = NULL;
-          ret = spi_bus_add_device(SPI3_HOST, &devcfg, &spi_handle);
+          ret = spi_bus_add_device(W5500_SPI_HOST, &devcfg, &spi_handle);
           if(ret != ESP_OK) {
             Serial.printf("Failed to add SPI device: %s\n", esp_err_to_name(ret));
             ethBeginSuccess = false;
@@ -581,8 +585,8 @@ bool Network::connectWired() {
                   Serial.printf("Failed to create event loop: %s\n", esp_err_to_name(event_ret));
                 }
                 
-                // Note: We don't register ESP-IDF event handlers because they conflict
-                // with Arduino's ETH class. Instead we poll in checkW5500Link().
+                // The ESP-IDF netif glue tracks link state. We poll that state in
+                // checkW5500Link() instead of registering another global handler.
                 Serial.println("W5500: Using polling mode");
                 
                 // Attach to TCP/IP stack
@@ -594,6 +598,8 @@ bool Network::connectWired() {
                   esp_eth_driver_uninstall(eth_handle);
                   ethBeginSuccess = false;
                 } else {
+                  esp_netif_set_hostname(eth_netif, settings.hostname[0] != '\0' ? settings.hostname : "ESPSomfy-RTS");
+
                   // Store netif and handle for later use
                   this->w5500_netif = eth_netif;
                   this->w5500_eth_handle = eth_handle;
@@ -601,9 +607,15 @@ bool Network::connectWired() {
                   esp_eth_netif_glue_handle_t eth_netif_glue = esp_eth_new_netif_glue(eth_handle);
                   esp_netif_attach(eth_netif, eth_netif_glue);
                   
-                  // Start Ethernet driver (DHCP will be started when link is up)
+                  bool networkConfigured = this->configureW5500Network();
+                  if(!networkConfigured) {
+                    Serial.println("Failed to configure W5500 network settings");
+                  }
+
+                  // Start Ethernet driver. DHCP is started after link-up; a
+                  // static address has already been applied above.
                   Serial.println("W5500: Starting driver...");
-                  ret = esp_eth_start(eth_handle);
+                  ret = networkConfigured ? esp_eth_start(eth_handle) : ESP_FAIL;
                   if(ret != ESP_OK) {
                     Serial.printf("Failed to start Ethernet: %s\n", esp_err_to_name(ret));
                     ethBeginSuccess = false;
@@ -663,14 +675,15 @@ bool Network::connectWired() {
     else {
       // Ethernet succeeded, now we can disable WiFi
       WiFi.mode(WIFI_OFF);
-      if(!settings.IP.dhcp) {
-        if(!ETH.config(settings.IP.ip, settings.IP.gateway, settings.IP.subnet, settings.IP.dns1, settings.IP.dns2)) {
-          Serial.println("Unable to configure static IP address....");
-          ETH.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
+      if(!isSPI) {
+        if(!settings.IP.dhcp) {
+          if(!ETH.config(settings.IP.ip, settings.IP.gateway, settings.IP.subnet, settings.IP.dns1, settings.IP.dns2)) {
+            Serial.println("Unable to configure static IP address....");
+            ETH.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
+          }
         }
+        else ETH.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
       }
-      else
-        ETH.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, INADDR_NONE);
     }
   }
   this->connectStart = millis();
@@ -678,7 +691,17 @@ bool Network::connectWired() {
 }
 void Network::updateHostname() {
   if(settings.hostname[0] != '\0' && this->connected()) {
-    if(this->connType == conn_types_t::ethernet &&
+    if(this->connType == conn_types_t::ethernet && settings.Ethernet.isSPIController()) {
+      const char *hostname = nullptr;
+      if(this->w5500_netif && esp_netif_get_hostname(this->w5500_netif, &hostname) == ESP_OK &&
+        (!hostname || strcmp(settings.hostname, hostname) != 0)) {
+        Serial.printf("Updating host name to %s...\n", settings.hostname);
+        esp_netif_set_hostname(this->w5500_netif, settings.hostname);
+        MDNS.setInstanceName(settings.hostname);
+        SSDP.setName(0, settings.hostname);
+      }
+    }
+    else if(this->connType == conn_types_t::ethernet &&
       strcmp(settings.hostname, ETH.getHostname()) != 0) {
       Serial.printf("Updating host name to %s...\n", settings.hostname);
       ETH.setHostname(settings.hostname);
@@ -692,6 +715,32 @@ void Network::updateHostname() {
       SSDP.setName(0, settings.hostname);
      }
   }
+}
+
+bool Network::configureW5500Network() {
+  if(!this->w5500_netif) return false;
+
+  if(settings.IP.dhcp) {
+    esp_netif_dhcpc_stop(this->w5500_netif);
+    return true;
+  }
+
+  esp_netif_dhcpc_stop(this->w5500_netif);
+  esp_netif_ip_info_t ipInfo = {};
+  ipInfo.ip.addr = static_cast<uint32_t>(settings.IP.ip);
+  ipInfo.gw.addr = static_cast<uint32_t>(settings.IP.gateway);
+  ipInfo.netmask.addr = static_cast<uint32_t>(settings.IP.subnet);
+  if(esp_netif_set_ip_info(this->w5500_netif, &ipInfo) != ESP_OK) return false;
+
+  esp_netif_dns_info_t dnsInfo = {};
+  dnsInfo.ip.type = IPADDR_TYPE_V4;
+  dnsInfo.ip.u_addr.ip4.addr = static_cast<uint32_t>(settings.IP.dns1);
+  if(dnsInfo.ip.u_addr.ip4.addr != 0) esp_netif_set_dns_info(this->w5500_netif, ESP_NETIF_DNS_MAIN, &dnsInfo);
+  dnsInfo.ip.u_addr.ip4.addr = static_cast<uint32_t>(settings.IP.dns2);
+  if(dnsInfo.ip.u_addr.ip4.addr != 0) esp_netif_set_dns_info(this->w5500_netif, ESP_NETIF_DNS_BACKUP, &dnsInfo);
+
+  this->w5500IP = settings.IP.ip;
+  return true;
 }
 bool Network::connectWiFi(const uint8_t *bssid, const int32_t channel) {
   if(this->softAPOpened && WiFi.softAPgetStationNum() > 0) {
@@ -981,7 +1030,26 @@ void Network::checkW5500Link() {
   static unsigned long lastIPCheck = 0;
   static bool dhcpStarted = false;
   
-  // Once we have IP, just verify it's still valid periodically (every 30 seconds)
+  // The Ethernet netif is only up while the PHY reports a valid link. Checking
+  // this avoids treating a preconfigured static address as an active cable.
+  bool netifUp = this->w5500_netif && esp_netif_is_netif_up(this->w5500_netif);
+  if(!netifUp) {
+    if(this->w5500LinkUp || this->w5500GotIP) {
+      Serial.println("W5500: Link down");
+      this->connType = conn_types_t::unset;
+      this->disconnectTime = millis();
+      this->clearConnecting();
+    }
+    this->w5500LinkUp = false;
+    this->w5500GotIP = false;
+    dhcpStarted = false;
+    return;
+  }
+
+  if(!this->w5500LinkUp) Serial.println("W5500: Link up");
+  this->w5500LinkUp = true;
+
+  // Once we have IP, verify it is still valid periodically (every 30 seconds).
   if(this->w5500GotIP) {
     if(millis() - lastIPCheck >= 30000) {
       lastIPCheck = millis();
@@ -992,7 +1060,6 @@ void Network::checkW5500Link() {
             // IP lost, reset state
             Serial.println("W5500: IP lost!");
             this->w5500GotIP = false;
-            this->w5500LinkUp = false;
             this->connType = conn_types_t::unset;
             dhcpStarted = false;
           }
@@ -1006,12 +1073,12 @@ void Network::checkW5500Link() {
   if(millis() - lastIPCheck < 2000) return;
   lastIPCheck = millis();
   
-  // Start DHCP if not already started
-  if(!dhcpStarted && this->w5500_netif) {
+  // Start DHCP if not already started. Static configurations only need to
+  // wait for the netif to expose the configured address.
+  if(settings.IP.dhcp && !dhcpStarted && this->w5500_netif) {
     Serial.println("W5500: Starting DHCP client...");
     esp_netif_dhcpc_start(this->w5500_netif);
     dhcpStarted = true;
-    this->w5500LinkUp = true; // Assume link is up if we're trying DHCP
   }
   
   // Check for IP
@@ -1045,44 +1112,5 @@ void Network::checkW5500Link() {
       
       this->setConnected(conn_types_t::ethernet);
     }
-  }
-}
-
-// W5500 Event Handler for ESP-IDF events
-void Network::w5500EventHandler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
-  Network *self = static_cast<Network*>(arg);
-  
-  if(event_base == ETH_EVENT) {
-    switch(event_id) {
-      case ETHERNET_EVENT_CONNECTED:
-        Serial.println("W5500: Link Up");
-        self->w5500LinkUp = true;
-        break;
-      case ETHERNET_EVENT_DISCONNECTED:
-        Serial.println("W5500: Link Down");
-        self->w5500LinkUp = false;
-        self->w5500GotIP = false;
-        self->connType = conn_types_t::unset;
-        self->disconnectTime = millis();
-        break;
-      case ETHERNET_EVENT_START:
-        Serial.println("W5500: Started");
-        break;
-      case ETHERNET_EVENT_STOP:
-        Serial.println("W5500: Stopped");
-        self->w5500LinkUp = false;
-        self->w5500GotIP = false;
-        break;
-    }
-  } else if(event_base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
-    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-    Serial.printf("W5500: Got IP - %d.%d.%d.%d\n",
-      IP2STR(&event->ip_info.ip));
-    self->w5500GotIP = true;
-    self->w5500IP = IPAddress(esp_ip4_addr_get_byte(&event->ip_info.ip, 0),
-                               esp_ip4_addr_get_byte(&event->ip_info.ip, 1),
-                               esp_ip4_addr_get_byte(&event->ip_info.ip, 2),
-                               esp_ip4_addr_get_byte(&event->ip_info.ip, 3));
-    self->setConnected(conn_types_t::ethernet);
   }
 }

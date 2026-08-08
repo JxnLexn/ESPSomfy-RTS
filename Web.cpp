@@ -981,9 +981,6 @@ void Web::handleDownloadFirmware(WebServer &server) {
   if(err == 0) {
     if(server.hasArg("ver")) {
       if(strcmp(server.arg("ver").c_str(), "latest") == 0) rel = &repo.releases[0];
-      else if(strcmp(server.arg("ver").c_str(), "main") == 0) {
-        rel = &repo.releases[GIT_MAX_RELEASES];
-      }
       else {
         for(uint8_t i = 0; i < GIT_MAX_RELEASES; i++) {
           if(repo.releases[i].id == 0) continue;

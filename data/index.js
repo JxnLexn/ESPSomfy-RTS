@@ -1270,7 +1270,7 @@ var security = new Security();
 
 class General {
     initialized = false; 
-    appVersion = 'v2.4.7';
+    appVersion = 'v2.4.8';
     reloadApp = false;
     init() {
         if (this.initialized) return;
@@ -4610,7 +4610,7 @@ class Firmware {
                 // Sort the releases so that the pre-releases are at the bottom.
                 rel.releases.sort((a, b) => a.preRelease === b.preRelease && b.draft === a.draft ? 0 : a.preRelease ? 1 : -1);
 
-                let html = `<div>Select a version from the repository to install using the dropdown below.  Then press the update button to install that version.</div><div style="font-size:.7em;margin-top:4px;">Select Main to install the most recent alpha version from the repository.</div>`;
+                let html = `<div>Select a release from the repository to install using the dropdown below. Then press the update button to install that version.</div>`;
                 html += `<div id="divPrereleaseWarning" style="display:none;width:100%;color:red;text-align:center;font-weight:bold;"><span style="margin-top:7px;width:100%;padding:3px;display:inline-block;border-radius:5px;background:white;">WARNING<span><hr style="margin:0px" /><div style="font-size:.7em;padding-left:1em;padding-right:1em;color:black;font-weight:normal;">You have selected a pre-released beta version that has not been fully tested or published for general use.</div></div>`;
                 html += `<div class="field-group" style="text-align:center;">`;
                 html += `<select id="selVersion" data-bind="version" style="width:70%;font-size:2em;color:white;text-align-last:center;" onchange="firmware.gitReleaseSelected(document.getElementById('divGitInstall'));">`
@@ -4664,7 +4664,7 @@ class Firmware {
         let overlay = ui.waitMessage(document.getElementById('divContainer'));
         try {
             let ret = {};
-            ret.resp = await fetch(`https://api.github.com/repos/rstrouse/espsomfy-rts/releases/tags/${tag}`);
+            ret.resp = await fetch(`https://api.github.com/repos/JxnLexn/ESPSomfy-RTS/releases/tags/${tag}`);
             if (ret.resp.ok)
                 ret.info = await ret.resp.json();
             return ret;
@@ -4893,4 +4893,3 @@ class Firmware {
     }
 }
 var firmware = new Firmware();
-

@@ -3,11 +3,11 @@ name: ESPSomfy-RTS
 on: [push, pull_request]
 
 env:
-  ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS: "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_dev_index.json"
+  ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS: "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json"
   ARDUINO_CLI_VERSION: "0.x"
-  ARDUINO_ESP32_VERSION: "2.0.10"
-  ARDUINO_JSON_VERSION: "6.21.3"
-  ESPTOOL_VERSION: "4.6"
+  ARDUINO_ESP32_VERSION: "2.0.17"
+  ARDUINO_JSON_VERSION: "6.21.5"
+  ESPTOOL_VERSION: "4.7"
   LITTLEFS_VERSION: "v2.5.1"
   MKLITTLEFS_VERSION: "3.1.0"
   PUB_SUB_CLIENT_VERSION: "2.8.0"
@@ -22,17 +22,17 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Checkout mklittlefs
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: earlephilhower/mklittlefs
           path: mklittlefs
           ref: ${{ env.MKLITTLEFS_VERSION }}
 
       - name: Checkout LittleFS
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: littlefs-project/littlefs
           path: mklittlefs/littlefs
@@ -44,10 +44,10 @@ jobs:
 
       - name: Create LittleFS
         run: |
-          ./mklittlefs/mklittlefs --create data --size 1441792 SomfyController.littlefs.bin
+          ./mklittlefs/mklittlefs --create data --size 917504 SomfyController.littlefs.bin
 
       - name: Upload binaries
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: LittleFS
           path: SomfyController.littlefs.bin
@@ -85,17 +85,17 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           path: SomfyController
 
       - name: Get LittleFS
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: LittleFS
 
       - name: Install Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -128,7 +128,10 @@ jobs:
       - name: Build ${{ matrix.name }}
         run: |
           mkdir -p build
-          arduino-cli compile --clean --output-dir build --fqbn ${{ matrix.fqbn }} --warnings default ./SomfyController
+          arduino-cli compile --clean --output-dir build --fqbn ${{ matrix.fqbn }} \
+            --build-property "compiler.cpp.extra_flags=-fno-exceptions -fno-threadsafe-statics" \
+            --build-property "upload.maximum_size=1572864" \
+            --warnings default ./SomfyController
 
       - name: ${{ matrix.name }} Image
         run: |
@@ -137,10 +140,10 @@ jobs:
             ${{ matrix.addr_bootloader }} build/SomfyController.ino.bootloader.bin \
             0x8000 build/SomfyController.ino.partitions.bin \
             0x10000 build/SomfyController.ino.bin \
-            0x290000 SomfyController.littlefs.bin
+            0x310000 SomfyController.littlefs.bin
 
       - name: Upload ${{ matrix.name }}
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
           path: |

@@ -1,5 +1,18 @@
 # Upload Guide from Cursor
 
+## Important: first installation of v2.4.8
+
+Version v2.4.8 introduces a new partition table with two 1.5 MiB OTA slots
+and a 896 KiB LittleFS partition. Install one of the
+`SomfyController.onboard.*.bin.zip` release assets as a complete image for the
+first v2.4.8 installation. After that initial installation, future releases can
+be installed through the built-in GitHub update function.
+
+The ESP32-C3 has only one general-purpose SPI host. A CC1101 radio and W5500
+Ethernet controller therefore cannot use independent hardware SPI buses on
+that target. The W5500 integration is intended for ESP32 variants that expose
+a second SPI host, including the ESP32-S3 Waveshare Ethernet board preset.
+
 ## Installing PlatformIO
 
 1. **Install PlatformIO extension in Cursor**:

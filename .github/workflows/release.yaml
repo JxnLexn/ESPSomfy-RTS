@@ -1,8 +1,16 @@
 name: ESPSomfy-RTS Release
 
-on: 
-  release:
-    types: [published]
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   ARDUINO_BOARD_MANAGER_ADDITIONAL_URLS: "https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json"
@@ -23,14 +31,27 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Get Release
-        id: get_release
-        uses: bruceadams/get-release@v1.3.2
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-
       - name: Check out code
         uses: actions/checkout@v4
+
+      - name: Verify release version
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unsupported release tag: $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+          firmware_version="$(sed -n 's/^#define FW_VERSION "\([^"]*\)"/\1/p' ConfigSettings.h)"
+          app_version="v$(tr -d '\r\n' < data/appversion)"
+          web_version="$(sed -n "s/^[[:space:]]*appVersion = '\([^']*\)';/\1/p" data/index.js | head -n 1)"
+
+          for version in "$firmware_version" "$app_version" "$web_version"; do
+            if [[ "$version" != "$GITHUB_REF_NAME" ]]; then
+              echo "Tag $GITHUB_REF_NAME does not match embedded version $version"
+              exit 1
+            fi
+          done
 
       - name: Checkout mklittlefs
         uses: actions/checkout@v4
@@ -47,101 +68,71 @@ jobs:
           ref: ${{ env.LITTLEFS_VERSION }}
 
       - name: Build mklittlefs
-        run: |
-          make -C mklittlefs
+        run: make -C mklittlefs
 
-      - name: Create LittleFS
-        run: |
-          ./mklittlefs/mklittlefs --create data --size 1441792 SomfyController.littlefs.bin
+      - name: Create LittleFS image
+        run: ./mklittlefs/mklittlefs --create data --size 917504 SomfyController.littlefs.bin
 
-      - name: Upload binaries
+      - name: Upload LittleFS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LittleFS
+          name: littlefs
           path: SomfyController.littlefs.bin
+          if-no-files-found: error
           retention-days: 5
 
-      - name: Upload LittleFS
-        uses: shogo82148/actions-upload-release-asset@v1.7.5
-        with:
-          github_token: ${{ github.token }}
-          upload_url: ${{ steps.get_release.outputs.upload_url }}
-          asset_name: SomfyController.littlefs.bin
-          asset_path: SomfyController.littlefs.bin
-          overwrite: true
-
-  arduino:
-    permissions: write-all
+  firmware:
     name: ${{ matrix.name }}
-    needs: [littlefs]
+    needs: littlefs
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
       matrix:
         include:
-          - board: esp32
+          - name: ESP32
             addr_bootloader: 0x1000
             chip: ESP32
             fqbn: esp32:esp32:esp32wrover:PartitionScheme=default,FlashMode=qio,FlashFreq=80,UploadSpeed=921600,DebugLevel=none,EraseFlash=none
-            #     esp32:esp32:esp32wrover:PartitionScheme=default,FlashMode=qio,FlashFreq=80,UploadSpeed=921600,DebugLevel=none,EraseFlash=none
-            name: ESP32
-            obname: SomfyController.onboard.esp32.bin
-            fwname: SomfyController.ino.esp32.bin
-          - board: esp32c3
+            firmware: SomfyController.ino.esp32.bin
+            onboard: SomfyController.onboard.esp32.bin
+          - name: ESP32C3
             addr_bootloader: 0x0
             chip: ESP32-C3
             fqbn: esp32:esp32:esp32c3:JTAGAdapter=default,CDCOnBoot=cdc,PartitionScheme=default,CPUFreq=160,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=921600,DebugLevel=none,EraseFlash=none
-            #     esp32:esp32:esp32c3:JTAGAdapter=default,CDCOnBoot=default,PartitionScheme=default,CPUFreq=160,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=921600,DebugLevel=none,EraseFlash=none
-            name: ESP32C3
-            obname: SomfyController.onboard.esp32c3.bin
-            fwname: SomfyController.ino.esp32c3.bin
-          - board: esp32s2
+            firmware: SomfyController.ino.esp32c3.bin
+            onboard: SomfyController.onboard.esp32c3.bin
+          - name: ESP32S2
             addr_bootloader: 0x1000
             chip: ESP32-S2
             fqbn: esp32:esp32:esp32s2:JTAGAdapter=default,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,PSRAM=disabled,PartitionScheme=default,CPUFreq=240,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=921600,DebugLevel=none,EraseFlash=none
-            #     esp32:esp32:esp32s2:JTAGAdapter=default,CDCOnBoot=default,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,PSRAM=disabled,PartitionScheme=default,CPUFreq=240,FlashMode=qio,FlashFreq=80,FlashSize=4M,UploadSpeed=921600,DebugLevel=none,EraseFlash=none
-            name: ESP32S2
-            obname: SomfyController.onboard.esp32s2.bin
-            fwname: SomfyController.ino.esp32s2.bin
-          - board: esp32s3
+            firmware: SomfyController.ino.esp32s2.bin
+            onboard: SomfyController.onboard.esp32s2.bin
+          - name: ESP32S3
             addr_bootloader: 0x0
             chip: ESP32-S3
             fqbn: esp32:esp32:esp32s3:JTAGAdapter=default,PSRAM=disabled,FlashMode=qio,FlashSize=4M,LoopCore=1,EventsCore=1,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,PartitionScheme=default,CPUFreq=240,UploadSpeed=921600,DebugLevel=none,EraseFlash=none
-            #     esp32:esp32:esp32s3:JTAGAdapter=default,PSRAM=disabled,FlashMode=qio,FlashSize=4M,LoopCore=1,EventsCore=1,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,PartitionScheme=default,CPUFreq=240,UploadSpeed=921600,DebugLevel=none,EraseFlash=none
-            name: ESP32S3
-            fwname: SomfyController.ino.esp32s3.bin
-            obname: SomfyController.onboard.esp32s3.bin
-    steps:
-      - name: Get Release
-        id: get_release
-        uses: bruceadams/get-release@v1.3.2
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+            firmware: SomfyController.ino.esp32s3.bin
+            onboard: SomfyController.onboard.esp32s3.bin
 
+    steps:
       - name: Check out code
         uses: actions/checkout@v4
         with:
           path: SomfyController
 
-      - name: Get LittleFS
+      - name: Download LittleFS artifact
         uses: actions/download-artifact@v4
         with:
-          name: LittleFS
+          name: littlefs
 
       - name: Install Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Upgrade pip
-        run: |
-          python -m pip install --upgrade pip
-          pip --version
-
       - name: Install ESPTool
-        run: |
-          pip install esptool==${{ env.ESPTOOL_VERSION }}
+        run: python -m pip install esptool==${{ env.ESPTOOL_VERSION }}
 
       - name: Install Arduino CLI
         uses: arduino/setup-arduino-cli@v1
@@ -153,7 +144,7 @@ jobs:
           arduino-cli core update-index
           arduino-cli core install esp32:esp32@${{ env.ARDUINO_ESP32_VERSION }}
 
-      - name: Configure Arduino Libraries
+      - name: Install Arduino libraries
         run: |
           arduino-cli lib install ArduinoJson@${{ env.ARDUINO_JSON_VERSION }}
           arduino-cli lib install PubSubClient@${{ env.PUB_SUB_CLIENT_VERSION }}
@@ -162,39 +153,79 @@ jobs:
 
       - name: Build ${{ matrix.name }}
         run: |
-          mkdir -p build${{ matrix.name }}
-          arduino-cli compile --clean --output-dir build${{ matrix.name }} --fqbn ${{ matrix.fqbn }} --warnings none ./SomfyController
+          mkdir -p build
+          arduino-cli compile --clean --output-dir build --fqbn "${{ matrix.fqbn }}" \
+            --build-property "compiler.cpp.extra_flags=-fno-exceptions -fno-threadsafe-statics" \
+            --build-property "upload.maximum_size=1572864" \
+            --warnings none ./SomfyController
 
-      - name: ${{ matrix.name }} Image
+      - name: Create ${{ matrix.name }} onboard image
         run: |
-          python -m esptool --chip ${{ matrix.chip }} \
-            merge_bin -o ${{ matrix.obname }} \
-            ${{ matrix.addr_bootloader }} build${{ matrix.name }}/SomfyController.ino.bootloader.bin \
-            0x8000 build${{ matrix.name }}/SomfyController.ino.partitions.bin \
-            0x10000 build${{ matrix.name }}/SomfyController.ino.bin \
-            0x290000 SomfyController.littlefs.bin
+          python -m esptool --chip "${{ matrix.chip }}" merge_bin -o "${{ matrix.onboard }}" \
+            "${{ matrix.addr_bootloader }}" build/SomfyController.ino.bootloader.bin \
+            0x8000 build/SomfyController.ino.partitions.bin \
+            0x10000 build/SomfyController.ino.bin \
+            0x310000 SomfyController.littlefs.bin
+          cp build/SomfyController.ino.bin "${{ matrix.firmware }}"
+          zip "${{ matrix.onboard }}.zip" "${{ matrix.onboard }}"
 
-      - name: Upload Firmware ${{ matrix.name }}
-        uses: shogo82148/actions-upload-release-asset@v1.7.5
+      - name: Upload ${{ matrix.name }} release assets
+        uses: actions/upload-artifact@v4
         with:
-          github_token: ${{ github.token }}
-          upload_url: ${{ steps.get_release.outputs.upload_url }}
-          asset_name: ${{ matrix.fwname }}
-          asset_path: build${{ matrix.name }}/SomfyController.ino.bin
+          name: release-${{ matrix.name }}
+          path: |
+            ${{ matrix.firmware }}
+            ${{ matrix.onboard }}.zip
+          if-no-files-found: error
+          retention-days: 5
 
-      - name: ${{ matrix.name }} Compress Onboard Image
+  release:
+    name: Publish release
+    needs:
+      - littlefs
+      - firmware
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*"
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify release assets
+        working-directory: release-assets
         run: |
-          zip ${{ matrix.obname }}.zip ./${{ matrix.obname }}
+          expected=(
+            SomfyController.ino.esp32.bin
+            SomfyController.ino.esp32c3.bin
+            SomfyController.ino.esp32s2.bin
+            SomfyController.ino.esp32s3.bin
+            SomfyController.littlefs.bin
+            SomfyController.onboard.esp32.bin.zip
+            SomfyController.onboard.esp32c3.bin.zip
+            SomfyController.onboard.esp32s2.bin.zip
+            SomfyController.onboard.esp32s3.bin.zip
+          )
 
-      - name: Upload Onboard ${{ matrix.name }}
-        uses: shogo82148/actions-upload-release-asset@v1.7.5
-        # env:
-        #  GITHUB_TOKEN: ${{ github.token }}
-        with:
-          github_token: ${{ github.token }}
-          upload_url: ${{ steps.get_release.outputs.upload_url }}
-          asset_name: ${{ matrix.obname }}.zip
-          asset_path: ${{ matrix.obname }}.zip
-          overwrite: true
-          asset_content_type: application/zip
-          
+          for asset in "${expected[@]}"; do
+            test -s "$asset" || { echo "Missing or empty release asset: $asset"; exit 1; }
+          done
+
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq "${#expected[@]}" || {
+            echo "Unexpected release asset set:"
+            find . -maxdepth 1 -type f -print
+            exit 1
+          }
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            release-assets/*
