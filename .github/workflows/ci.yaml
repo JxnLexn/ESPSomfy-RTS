@@ -49,6 +49,13 @@ jobs:
         run: |
           ./mklittlefs/mklittlefs --create data --size 917504 SomfyController.littlefs.bin
 
+      - name: Verify LittleFS contents
+        run: |
+          mkdir -p littlefs-contents
+          ./mklittlefs/mklittlefs --unpack littlefs-contents SomfyController.littlefs.bin
+          test -s littlefs-contents/index.html
+          test "$(tr -d '\r\n' < littlefs-contents/appversion)" = "$(tr -d '\r\n' < data/appversion)"
+
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
@@ -144,6 +151,12 @@ jobs:
             0x8000 build/SomfyController.ino.partitions.bin \
             0x10000 build/SomfyController.ino.bin \
             0x310000 SomfyController.littlefs.bin
+
+      - name: Verify ${{ matrix.name }} onboard filesystem
+        run: |
+          dd if=build/SomfyController.onboard.bin of=build/onboard.littlefs.bin \
+            bs=4096 skip=784 count=224 status=none
+          cmp SomfyController.littlefs.bin build/onboard.littlefs.bin
 
       - name: Upload ${{ matrix.name }}
         uses: actions/upload-artifact@v4

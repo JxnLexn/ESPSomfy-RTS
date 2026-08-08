@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <LittleFS.h>
 #include <esp_task_wdt.h>
+#include <esp_partition.h>
 #include "ConfigSettings.h"
 #include "Network.h"
 #include "Web.h"
@@ -20,12 +21,33 @@ MQTTClass mqtt;
 GitUpdater git;
 
 uint32_t oldheap = 0;
+
+bool mountFileSystem() {
+  const esp_partition_t *partition = esp_partition_find_first(
+    ESP_PARTITION_TYPE_DATA,
+    ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
+    nullptr
+  );
+  if(!partition) {
+    Serial.println("Error locating LittleFS partition");
+    return false;
+  }
+
+  Serial.printf(
+    "Mounting LittleFS partition '%s' at 0x%06lx (%lu bytes)...\n",
+    partition->label,
+    (unsigned long)partition->address,
+    (unsigned long)partition->size
+  );
+  return LittleFS.begin(false, "/littlefs", 10, partition->label);
+}
+
 void setup() {
   Serial.begin(115200);
   Serial.println();
   Serial.println("Startup/Boot....");
   Serial.println("Mounting File System...");
-  if(LittleFS.begin()) Serial.println("File system mounted successfully");
+  if(mountFileSystem()) Serial.println("File system mounted successfully");
   else Serial.println("Error mounting file system");
   settings.begin();
   if(WiFi.status() == WL_CONNECTED) WiFi.disconnect(true);
