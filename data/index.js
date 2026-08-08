@@ -22,7 +22,8 @@ var errors = [
     { code: -40, desc: "Git Download: Http Error." },
     { code: -41, desc: "Git Download: Buffer Allocation Error." },
     { code: -42, desc: "Git Download: Download Connection Error." },
-    { code: -43, desc: 'Git Download: Timeout Error.' }
+    { code: -43, desc: 'Git Download: Timeout Error.' },
+    { code: -50, desc: 'GitHub connection or DNS lookup failed.' }
 ]
 document.oncontextmenu = (event) => {
     if (event.target && event.target.tagName.toLowerCase() === 'input' && (event.target.type.toLowerCase() === 'text' || event.target.type.toLowerCase() === 'password'))
@@ -1270,7 +1271,7 @@ var security = new Security();
 
 class General {
     initialized = false; 
-    appVersion = 'v2.5.1';
+    appVersion = 'v2.5.2';
     reloadApp = false;
     init() {
         if (this.initialized) return;

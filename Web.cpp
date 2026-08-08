@@ -978,7 +978,7 @@ void Web::handleDownloadFirmware(WebServer &server) {
   if(server.method() == HTTP_OPTIONS) { server.send(200, "OK"); return; }
   GitRepo repo;
   GitRelease *rel = nullptr;
-  int8_t err = repo.getReleases();
+  int16_t err = repo.getReleases();
   Serial.println("downloadFirmware called...");
   if(err == 0) {
     if(server.hasArg("ver")) {
@@ -1008,7 +1008,9 @@ void Web::handleDownloadFirmware(WebServer &server) {
       server.send(500, _encoding_json, F("{\"status\":\"ERROR\",\"desc\":\"Release version not supplied.\"}"));
   }
   else {
-      server.send(err, _encoding_json, F("{\"status\":\"ERROR\",\"desc\":\"Error communicating with Github.\"}"));
+      snprintf(g_content, sizeof(g_content),
+        "{\"status\":\"ERROR\",\"desc\":\"Error communicating with Github.\",\"code\":%d}", err);
+      server.send(502, _encoding_json, g_content);
   }
 }
 void Web::handleNotFound(WebServer &server) {
@@ -1097,7 +1099,13 @@ void Web::begin() {
     webServer.sendCORSHeaders(server);
     if(server.method() == HTTP_OPTIONS) { server.send(200, "OK"); return; }
     GitRepo repo;
-    repo.getReleases();
+    int16_t err = repo.getReleases();
+    if(err != 0) {
+      snprintf(g_content, sizeof(g_content),
+        "{\"status\":\"ERROR\",\"desc\":\"Error communicating with Github.\",\"code\":%d}", err);
+      server.send(502, _encoding_json, g_content);
+      return;
+    }
     git.setCurrentRelease(repo);
     JsonResponse resp;
     resp.beginResponse(&server, g_content, sizeof(g_content));

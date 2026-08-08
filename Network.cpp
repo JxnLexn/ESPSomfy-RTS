@@ -536,6 +536,18 @@ bool Network::connectWired() {
             Serial.printf("Failed to add SPI device: %s\n", esp_err_to_name(ret));
             ethBeginSuccess = false;
           } else {
+            // The ESP-IDF W5500 MAC registers its interrupt handler during
+            // esp_eth_driver_install(), but it expects the global GPIO ISR
+            // service to exist already. Without it the RX task only wakes on
+            // its one-second fallback timeout, which makes every TCP transfer
+            // extremely slow.
+            ret = gpio_install_isr_service(ARDUINO_ISR_FLAG);
+            bool isrReady = ret == ESP_OK || ret == ESP_ERR_INVALID_STATE;
+            if(!isrReady) {
+              Serial.printf("Failed to install GPIO ISR service: %s\n", esp_err_to_name(ret));
+              ethBeginSuccess = false;
+            }
+
             // Create W5500 config
             eth_w5500_config_t w5500_config = ETH_W5500_DEFAULT_CONFIG(spi_handle);
             w5500_config.int_gpio_num = settings.Ethernet.INTPin;
@@ -550,9 +562,9 @@ bool Network::connectWired() {
             phy_config.phy_addr = 1;
             phy_config.reset_gpio_num = settings.Ethernet.RSTPin;
             
-            // Create MAC and PHY
-            esp_eth_mac_t *mac = esp_eth_mac_new_w5500(&w5500_config, &mac_config);
-            esp_eth_phy_t *phy = esp_eth_phy_new_w5500(&phy_config);
+            // Create MAC and PHY only after the interrupt service is ready.
+            esp_eth_mac_t *mac = isrReady ? esp_eth_mac_new_w5500(&w5500_config, &mac_config) : nullptr;
+            esp_eth_phy_t *phy = isrReady ? esp_eth_phy_new_w5500(&phy_config) : nullptr;
             
             if(mac == NULL || phy == NULL) {
               Serial.println("Failed to create W5500 MAC/PHY");
@@ -727,7 +739,9 @@ bool Network::configureW5500Network() {
   if(!this->w5500_netif) return false;
 
   if(settings.IP.dhcp) {
-    esp_netif_dhcpc_stop(this->w5500_netif);
+    // ESP_NETIF_DEFAULT_ETH creates the interface as a DHCP client. Keep it
+    // enabled so the Ethernet start action never tries to apply 0.0.0.0 as a
+    // static address before checkW5500Link() observes the active link.
     return true;
   }
 
@@ -1034,7 +1048,6 @@ void Network::checkW5500Link() {
   }
   
   static unsigned long lastIPCheck = 0;
-  static bool dhcpStarted = false;
   
   // The Ethernet netif is only up while the PHY reports a valid link. Checking
   // this avoids treating a preconfigured static address as an active cable.
@@ -1048,7 +1061,6 @@ void Network::checkW5500Link() {
     }
     this->w5500LinkUp = false;
     this->w5500GotIP = false;
-    dhcpStarted = false;
     return;
   }
 
@@ -1067,7 +1079,6 @@ void Network::checkW5500Link() {
             Serial.println("W5500: IP lost!");
             this->w5500GotIP = false;
             this->connType = conn_types_t::unset;
-            dhcpStarted = false;
           }
         }
       }
@@ -1078,14 +1089,6 @@ void Network::checkW5500Link() {
   // If we don't have IP yet, check for it every 2 seconds
   if(millis() - lastIPCheck < 2000) return;
   lastIPCheck = millis();
-  
-  // Start DHCP if not already started. Static configurations only need to
-  // wait for the netif to expose the configured address.
-  if(settings.IP.dhcp && !dhcpStarted && this->w5500_netif) {
-    Serial.println("W5500: Starting DHCP client...");
-    esp_netif_dhcpc_start(this->w5500_netif);
-    dhcpStarted = true;
-  }
   
   // Check for IP
   if(this->w5500_netif) {

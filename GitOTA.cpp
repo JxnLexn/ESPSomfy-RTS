@@ -3,6 +3,7 @@
 #include <Update.h>
 #include <HTTPClient.h>
 #include <esp_task_wdt.h>
+#include <lwip/netdb.h>
 #include "ConfigSettings.h"
 #include "GitOTA.h"
 #include "Utils.h"
@@ -29,6 +30,48 @@ extern Network net;
 #define GITHUB_API_RELEASES "https://api.github.com/repos/" GITHUB_REPOSITORY "/releases"
 #define GITHUB_RELEASE_DOWNLOAD "https://github.com/" GITHUB_REPOSITORY "/releases/download"
 #define GITHUB_REPOSITORY_URL "https://github.com/" GITHUB_REPOSITORY
+
+// Arduino-ESP32 2.0.17 resolves hostnames in WiFiClientSecure through
+// WiFi.hostByName(). On a W5500-only connection the private WiFi event group
+// does not exist, so its asynchronous DNS callback crashes in
+// xEventGroupSetBits(). Resolve through lwIP directly and then connect to the
+// numeric address while still passing the original hostname to TLS for SNI.
+class LwIPWiFiClientSecure : public WiFiClientSecure {
+  public:
+    int connect(const char *host, uint16_t port) override {
+      return this->connect(host, port, 30000);
+    }
+
+    int connect(const char *host, uint16_t port, int32_t timeout) override {
+      IPAddress address;
+      if(!resolve(host, address)) {
+        Serial.printf("DNS lookup failed for %s\n", host);
+        return 0;
+      }
+      this->_timeout = timeout;
+      return WiFiClientSecure::connect(address, port, host, nullptr, nullptr, nullptr);
+    }
+
+  private:
+    static bool resolve(const char *host, IPAddress &address) {
+      if(address.fromString(host)) return true;
+
+      struct addrinfo hints = {};
+      hints.ai_family = AF_INET;
+      hints.ai_socktype = SOCK_STREAM;
+      struct addrinfo *result = nullptr;
+      int err = lwip_getaddrinfo(host, nullptr, &hints, &result);
+      if(err != 0 || result == nullptr) {
+        if(result) lwip_freeaddrinfo(result);
+        return false;
+      }
+
+      const struct sockaddr_in *resolved = reinterpret_cast<const struct sockaddr_in *>(result->ai_addr);
+      address = resolved->sin_addr.s_addr;
+      lwip_freeaddrinfo(result);
+      return static_cast<uint32_t>(address) != 0;
+    }
+};
 
 void GitRelease::setReleaseProperty(const char *key, const char *val) {
   if(strcmp(key, "id") == 0) this->id = atol(val);
@@ -96,7 +139,7 @@ void GitRelease::toJSON(JsonResponse &json) {
 #define ERR_CLIENT_OFFSET -50
 
 int16_t GitRepo::getReleases(uint8_t num) {
-  WiFiClientSecure sclient;
+  LwIPWiFiClientSecure sclient;
   sclient.setInsecure();
   sclient.setHandshakeTimeout(3);
   uint8_t ndx = 0;
@@ -221,10 +264,14 @@ int16_t GitRepo::getReleases(uint8_t num) {
         sclient.stop();
         return httpCode;
       }
+    } else {
+      https.end();
+      sclient.stop();
+      return httpCode;
     }
     https.end();  
     sclient.stop();
-  }
+  } else return ERR_CLIENT_OFFSET;
   settings.printAvailHeap();
   return 0;
 }
@@ -248,6 +295,7 @@ void GitRepo::toJSON(JsonResponse &json) {
 #define ERR_DOWNLOAD_HTTP -40
 #define ERR_DOWNLOAD_BUFFER -41
 #define ERR_DOWNLOAD_CONNECTION -42
+#define ERR_DOWNLOAD_TIMEOUT -43
 
 void GitUpdater::loop() {
   if(!net.connected()) return;
@@ -281,7 +329,8 @@ void GitUpdater::checkForUpdate() {
   this->status = GIT_STATUS_CHECK;
   settings.printAvailHeap();  
   this->lastCheck = millis();
-  if(this->checkInternet() == 0) {
+  this->error = this->checkInternet();
+  if(this->error == 0) {
     GitRepo repo;
     this->updateAvailable = false;
     this->error = repo.getReleases(2);
@@ -291,7 +340,7 @@ void GitUpdater::checkForUpdate() {
     else {
       this->emitUpdateCheck();
     }
-  }
+  } else this->emitUpdateCheck();
   this->status = GIT_STATUS_READY;
 }
 void GitUpdater::setCurrentRelease(GitRepo &repo) {
@@ -349,7 +398,7 @@ void GitUpdater::emitUpdateCheck(uint8_t num) {
 int GitUpdater::checkInternet() {
   int err = 500;
   uint32_t t = millis();
-  WiFiClientSecure sclient;
+  LwIPWiFiClientSecure sclient;
   sclient.setInsecure();
   sclient.setHandshakeTimeout(3);
   esp_task_wdt_reset();
@@ -373,7 +422,7 @@ int GitUpdater::checkInternet() {
     }
     https.end();
     sclient.stop();
-  }
+  } else err = ERR_CLIENT_OFFSET;
   esp_task_wdt_reset();
   return err;
 }
@@ -467,9 +516,9 @@ bool GitUpdater::recoverFilesystem() {
   return true;
 }
 bool GitUpdater::endUpdate() { return true; }
-int8_t GitUpdater::downloadFile() {
+int16_t GitUpdater::downloadFile() {
   Serial.printf("Begin update %s\n", this->currentFile);
-  WiFiClientSecure sclient;
+  LwIPWiFiClientSecure sclient;
   sclient.setInsecure();
   HTTPClient https;
   char url[196];
@@ -486,6 +535,12 @@ int8_t GitUpdater::downloadFile() {
       uint8_t pct = 0;
       Serial.printf("[HTTPS] GET... code: %d - %d\n", httpCode, len);
       if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY || httpCode == HTTP_CODE_FOUND) {
+        if(len <= 0) {
+          Serial.println("Update response has no valid Content-Length");
+          https.end();
+          sclient.stop();
+          return ERR_DOWNLOAD_HTTP;
+        }
         WiFiClient *stream = https.getStreamPtr();
         if(!Update.begin(len, this->partition)) {
           Serial.println("Update Error detected!!!!!");
@@ -531,6 +586,10 @@ int8_t GitUpdater::downloadFile() {
                 if(!Update.end(true)) {
                   Serial.println("Error downloading update...");
                   Update.printError(Serial);
+                  https.end();
+                  sclient.stop();
+                  free(buff);
+                  return -(Update.getError() + UPDATE_ERR_OFFSET);
                 }
                 else {
                   Serial.println("Update.end Called...");
@@ -546,7 +605,7 @@ int8_t GitUpdater::downloadFile() {
                 https.end();
                 free(buff);
                 Serial.println("Stream timeout!!!");
-                return -43;
+                return ERR_DOWNLOAD_TIMEOUT;
               }
               sockEmit.loop();
               webServer.loop();
@@ -558,14 +617,16 @@ int8_t GitUpdater::downloadFile() {
             Update.abort();
             somfy.commit();
             Serial.println("Error downloading file!!!");
-            return -42;
+            return ERR_DOWNLOAD_CONNECTION;
           }
           else
             Serial.printf("Update %s complete\n", this->currentFile);
         }
         else {
-          // TODO: memory allocation error.
           Serial.println("Unable to allocate memory for update!!!");
+          https.end();
+          sclient.stop();
+          return ERR_DOWNLOAD_BUFFER;
         }
       }
       else {
@@ -575,11 +636,14 @@ int8_t GitUpdater::downloadFile() {
     }        
     else {
       Serial.printf("Invalid HTTP Code: %d\n", httpCode);
+      https.end();
+      sclient.stop();
+      return httpCode;
     }
     https.end(); 
     sclient.stop(); 
     Serial.printf("End update %s\n", this->currentFile);
-  }
+  } else return ERR_DOWNLOAD_CONNECTION;
   esp_task_wdt_reset();
   return 0;
 }

@@ -54,7 +54,7 @@ class GitUpdater {
     void checkForUpdate();
     bool beginUpdate(const char *release);
     bool endUpdate();
-    int8_t downloadFile();
+    int16_t downloadFile();
     void setFirmwareFile();
     void setCurrentRelease(GitRepo &repo);
     void loop();
