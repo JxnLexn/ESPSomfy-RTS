@@ -3,6 +3,8 @@
 #include <SPI.h>
 #include <WebServer.h>
 #include <esp_task_wdt.h>
+#include <soc/gpio_reg.h>
+#include <soc/soc_caps.h>
 #include "Utils.h"
 #include "ConfigSettings.h"
 #include "Somfy.h"
@@ -4312,21 +4314,42 @@ bool somfy_rx_queue_t::pop(somfy_rx_t *rx) {
 
 void Transceiver::sendFrame(byte *frame, uint8_t sync, uint8_t bitLength) {
   if(!this->config.enabled) return;
-  uint32_t pin = 1 << this->config.TXPin;
+  const uint8_t txPin = this->config.TXPin;
+  if(txPin >= SOC_GPIO_PIN_COUNT) {
+    Serial.printf("Cannot send frame: TX GPIO %u is invalid for this chip\n", txPin);
+    return;
+  }
+
+  uint32_t setRegister;
+  uint32_t clearRegister;
+  uint32_t pinMask;
+#if SOC_GPIO_PIN_COUNT > 32
+  if(txPin >= 32) {
+    setRegister = GPIO_OUT1_W1TS_REG;
+    clearRegister = GPIO_OUT1_W1TC_REG;
+    pinMask = 1UL << (txPin - 32);
+  }
+  else
+#endif
+  {
+    setRegister = GPIO_OUT_W1TS_REG;
+    clearRegister = GPIO_OUT_W1TC_REG;
+    pinMask = 1UL << txPin;
+  }
   if (sync == 2 || sync == 12) {  // Only with the first frame.  Repeats do not get a wakeup pulse.
     // All information online for the wakeup pulse appears to be incorrect.  While there is a wakeup
     // pulse it only sends an initial pulse.  There is no further delay after this.
     
     // Wake-up pulse
     //Serial.printf("Sending wakeup pulse: %d\n", sync);
-    REG_WRITE(GPIO_OUT_W1TS_REG, pin);
+    REG_WRITE(setRegister, pinMask);
     delayMicroseconds(10920);
     //delayMicroseconds(9415);
     
     // There is no silence after the wakeup pulse.  I tested this with Telis and no silence
     // was detected.  I suspect that for some battery powered shades the shade would go back
     // to sleep from the time of the initial pulse while the silence was occurring.
-    REG_WRITE(GPIO_OUT_W1TC_REG, pin);
+    REG_WRITE(clearRegister, pinMask);
     delayMicroseconds(7357);
     //delayMicroseconds(9565);
     //delay(80);
@@ -4335,32 +4358,32 @@ void Transceiver::sendFrame(byte *frame, uint8_t sync, uint8_t bitLength) {
   // 56-bit 2 pulses for the first frame and 7 for the repeats
   // 80-bit 24 pulses for the first frame and 14 pulses for the repeats
   for (int i = 0; i < sync; i++) {
-    REG_WRITE(GPIO_OUT_W1TS_REG, pin);
+    REG_WRITE(setRegister, pinMask);
     delayMicroseconds(4 * SYMBOL);
-    REG_WRITE(GPIO_OUT_W1TC_REG, pin);
+    REG_WRITE(clearRegister, pinMask);
     delayMicroseconds(4 * SYMBOL);
   }
   // Software sync
-  REG_WRITE(GPIO_OUT_W1TS_REG, pin);
+  REG_WRITE(setRegister, pinMask);
   //delayMicroseconds(4450); -- Initial timing.
   delayMicroseconds(4850);
   // Start 0
-  REG_WRITE(GPIO_OUT_W1TC_REG, pin);
+  REG_WRITE(clearRegister, pinMask);
   delayMicroseconds(SYMBOL);
   // Payload starting with the most significant bit.  The frame is always supplied in 80 bits
   // but if the protocol is calling for 56 bits it will only send 56 bits of the frame.
   uint8_t last_bit = 0;
   for (byte i = 0; i < bitLength; i++) {
     if (((frame[i / 8] >> (7 - (i % 8))) & 1) == 1) {
-      REG_WRITE(GPIO_OUT_W1TC_REG, pin);
+      REG_WRITE(clearRegister, pinMask);
       delayMicroseconds(SYMBOL);
-      REG_WRITE(GPIO_OUT_W1TS_REG, pin);
+      REG_WRITE(setRegister, pinMask);
       delayMicroseconds(SYMBOL);
       last_bit = 1;
     } else {
-      REG_WRITE(GPIO_OUT_W1TS_REG, pin);
+      REG_WRITE(setRegister, pinMask);
       delayMicroseconds(SYMBOL);
-      REG_WRITE(GPIO_OUT_W1TC_REG, pin);
+      REG_WRITE(clearRegister, pinMask);
       delayMicroseconds(SYMBOL);
       last_bit = 0;
     }
@@ -4368,13 +4391,13 @@ void Transceiver::sendFrame(byte *frame, uint8_t sync, uint8_t bitLength) {
   // End with a 0 no matter what.  This accommodates the 56-bit protocol by telling the
   // motor that there are no more follow on bits.
   if(last_bit == 0) {
-    REG_WRITE(GPIO_OUT_W1TS_REG, pin);
+    REG_WRITE(setRegister, pinMask);
     //delayMicroseconds(SYMBOL);
   }
     
   // Inter-frame silence for 56-bit protocols are around 34ms.  However, an 80 bit protocol should
   // reduce this by the transmission of SYMBOL * 24 or 15,360us
-  REG_WRITE(GPIO_OUT_W1TC_REG, pin);
+  REG_WRITE(clearRegister, pinMask);
   // Below are the original calculations for inter-frame silence.  However, when actually inspecting this from
   // the remote it appears to be closer to 27500us.  The delayMicoseconds call cannot be called with
   // values larger than 16383.
